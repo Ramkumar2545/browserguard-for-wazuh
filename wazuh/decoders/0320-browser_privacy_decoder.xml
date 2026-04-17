@@ -1,0 +1,78 @@
+<!--
+  Wazuh Browser Privacy Monitor — Decoder
+  Author  : Ram Kumar G (IT Fortress)
+  Version : 1.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
+
+  DESIGN:
+    Phase 3 outputs pure JSON lines to the log file.
+    Wazuh localfile is configured with log_format="json", so Wazuh
+    automatically parses every field without needing regex decoders.
+
+    This decoder file is provided as documentation / fallback for
+    environments where log_format="json" cannot be used (e.g. syslog relay),
+    in which case the JSON line arrives inside a syslog wrapper.
+
+  JSON fields emitted by collector:
+    integration         : "browser-privacy-monitor"
+    event_type          : "browser_visit" | "service_started" | "service_stopped"
+    version             : collector version string
+    timestamp           : ISO 8601 visit time
+    endpoint            : agent hostname
+    platform            : Windows | Linux | Darwin
+    user                : OS username
+    browser             : browser name
+    browser_profile     : profile directory name
+    domain              : hostname only (never path or query)
+    sensitive_detected  : true | false
+    sensitive_type      : auth_token | session_id | password_reset | magic_link |
+                          auth_code | api_key | credential | credential_page |
+                          token | email | internal_doc | personal_query |
+                          file_download | anonymizer | cloud_storage | none
+    risk_category       : same value set as sensitive_type
+    risk_score          : 1-10 integer
+    url_redacted        : masked URL (sensitive params replaced with ***REDACTED***)
+    url_hash            : SHA-256 of original URL (for correlation only)
+    title_redacted      : masked page title
+    title_hash          : SHA-256 of original title (for correlation only)
+
+  IMPORTANT — What is NEVER in these logs:
+    - Full URL query strings
+    - Session IDs / tokens
+    - API keys / secrets
+    - Auth codes / OAuth tokens
+    - Email addresses (unless already in the domain name)
+    - Reset / magic-link tokens
+    - Internal document IDs
+
+  Localfile config for Wazuh agent (ossec.conf):
+    <localfile>
+      <log_format>json</log_format>
+      <location>/root/.browser-privacy-monitor/browser_privacy.log</location>
+      <label key="integration">browser-privacy-monitor</label>
+    </localfile>
+
+  Windows:
+    <localfile>
+      <log_format>json</log_format>
+      <location>C:\BrowserPrivacyMonitor\browser_privacy.log</location>
+      <label key="integration">browser-privacy-monitor</label>
+    </localfile>
+-->
+
+<!-- ══════════════════════════════════════════════════════════════
+     SYSLOG RELAY FALLBACK — only needed if log_format="syslog"
+     is used instead of log_format="json".
+     Skip these decoders if using log_format="json" (recommended).
+     ══════════════════════════════════════════════════════════════ -->
+
+<!-- Parent: match syslog header containing our tag -->
+<decoder name="browser-privacy-monitor">
+  <program_name>^browser\-privacy\-monitor$</program_name>
+</decoder>
+
+<!-- Child: extract JSON from the syslog body -->
+<decoder name="browser-privacy-monitor-json">
+  <parent>browser-privacy-monitor</parent>
+  <prematch>^\{</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
