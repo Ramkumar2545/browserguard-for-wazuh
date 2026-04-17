@@ -626,7 +626,6 @@ rm ~/Library/LaunchAgents/com.ramkumar.browser-privacy-monitor.plist
 | url_hash (correlation) | ❌ | ❌ | ✅ |
 | Endpoint redaction engine | ❌ | ❌ | ✅ |
 | Indexer ingest pipeline | ❌ | ❌ | ✅ (optional) |
-| Dashboard spy risk | ⚠️ High | ⚠️ High | ✅ Eliminated |
 | log_format | syslog | syslog | **json** |
 
 ---
