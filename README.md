@@ -183,7 +183,7 @@ Select-String "service_started" "C:\BrowserPrivacyMonitor\browser_privacy.log" |
 
 After installing the endpoint collector, configure the Wazuh Manager:
 
-### 1. Deploy decoder
+### Step 1 — Deploy decoder
 
 ```bash
 cp wazuh/decoders/0320-browser_privacy_decoder.xml /var/ossec/etc/decoders/
@@ -191,20 +191,20 @@ cp wazuh/decoders/0320-browser_privacy_decoder.xml /var/ossec/etc/decoders/
 
 > If using `log_format=json` (default, recommended), this decoder is only needed as a syslog-relay fallback. Wazuh auto-parses JSON fields natively.
 
-### 2. Deploy rules
+### Step 2 — Deploy rules
 
 ```bash
 cp wazuh/rules/0320-browser_privacy_rules.xml /var/ossec/etc/rules/
 ```
 
-### 3. Validate and restart
+### Step 3 — Validate and restart
 
 ```bash
 /var/ossec/bin/wazuh-logtest -V
 systemctl restart wazuh-manager
 ```
 
-### 4. Test with wazuh-logtest
+### Step 4 — Test with wazuh-logtest
 
 Paste this into `/var/ossec/bin/wazuh-logtest` to verify rules fire correctly:
 
@@ -241,6 +241,204 @@ The installer adds this block automatically. If you need to add it manually:
   <label key="integration">browser-privacy-monitor</label>
 </localfile>
 ```
+
+---
+
+## Layer 2 — Indexer Ingest Pipeline
+
+> ⚠️ **Read this carefully before applying the pipeline.**
+
+### How it actually works in Wazuh
+
+Wazuh uses **Filebeat** to forward alerts from the Wazuh Manager to the Wazuh Indexer (OpenSearch). Filebeat already loads its own ingest pipeline called `filebeat-7.10.2-wazuh-alerts-pipeline` which processes every alert document before it gets indexed.
+
+The file that controls this pipeline is on the **Wazuh Manager**:
+```
+/usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json
+```
+
+**There are two valid ways to apply the privacy pipeline:**
+
+---
+
+### Method A — Inject into Filebeat's existing pipeline (Recommended)
+
+This is the correct, stable way. You add the privacy processors directly into Filebeat's pipeline file on the Wazuh Manager, then reload it.
+
+#### Step 1 — Back up the existing pipeline
+
+```bash
+cp /usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json \
+   /usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json.bak
+```
+
+#### Step 2 — Add privacy processors to the pipeline
+
+Open the file:
+```bash
+nano /usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json
+```
+
+Find the `"processors": [` array and add these processors **before the final `remove` processors** at the bottom of the list:
+
+```json
+{
+  "gsub": {
+    "field": "data.url_redacted",
+    "pattern": "#.*$",
+    "replacement": "#[fragment-removed]",
+    "ignore_missing": true,
+    "ignore_failure": true
+  }
+},
+{
+  "script": {
+    "lang": "painless",
+    "source": "if (ctx.data != null && ctx.data.url_redacted != null) { def url = ctx.data.url_redacted; def tokenPattern = /[A-Za-z0-9+\\/_~\\-]{64,}/; if (tokenPattern.matcher(url).find()) { ctx.data.url_redacted = '[PIPELINE-MASKED]'; ctx.data.pipeline_masked = true; } }",
+    "ignore_failure": true
+  }
+},
+{
+  "remove": {
+    "field": ["data.url", "data.full_url", "data.raw_url"],
+    "ignore_missing": true,
+    "ignore_failure": true
+  }
+},
+{
+  "remove": {
+    "field": ["data.title", "data.page_title", "data.raw_title"],
+    "ignore_missing": true,
+    "ignore_failure": true
+  }
+},
+{
+  "convert": {
+    "field": "data.risk_score",
+    "type": "integer",
+    "ignore_missing": true,
+    "ignore_failure": true
+  }
+},
+{
+  "convert": {
+    "field": "data.sensitive_detected",
+    "type": "boolean",
+    "ignore_missing": true,
+    "ignore_failure": true
+  }
+}
+```
+
+#### Step 3 — Reload the pipeline into the Indexer
+
+```bash
+filebeat setup --pipelines --modules wazuh
+```
+
+Expected output: `Loaded Ingest pipelines`
+
+#### Step 4 — Verify the pipeline was loaded
+
+```bash
+curl -u admin:YOUR_PASSWORD -k \
+  "https://localhost:9200/_ingest/pipeline/filebeat-7.10.2-wazuh-alerts-pipeline" \
+  | python3 -m json.tool | grep -A5 "url_redacted"
+```
+
+You should see your `gsub` processor for `data.url_redacted` in the output.
+
+---
+
+### Method B — Register as a separate pipeline via API (Optional / Advanced)
+
+If you want to keep the privacy pipeline completely separate from Filebeat's pipeline, you can register it as its own OpenSearch pipeline. This is optional — **Layer 1 endpoint redaction already handles 99% of protection**, so Method B is only needed if you want indexer-level enforcement as an extra guarantee.
+
+#### Step 1 — Create clean pipeline JSON (strip comments)
+
+Run this on the Wazuh Manager:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Ramkumar2545/wazuh-browser-privacy-monitor/main/wazuh/pipelines/browser_privacy_pipeline.json \
+  | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+clean = {k: v for k, v in d.items() if not k.startswith('_')}
+clean['processors'] = [{k2: v2 for k2, v2 in p.items() if k2 != '_comment'} for p in clean['processors']]
+print(json.dumps(clean, indent=2))
+" > /tmp/browser_privacy_pipeline_clean.json
+```
+
+#### Step 2 — Register on the Indexer
+
+```bash
+curl -u admin:YOUR_PASSWORD -k \
+  -X PUT "https://localhost:9200/_ingest/pipeline/browser-privacy-monitor" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/browser_privacy_pipeline_clean.json
+```
+
+Expected: `{"acknowledged": true}`
+
+#### Step 3 — Verify it registered
+
+```bash
+curl -u admin:YOUR_PASSWORD -k \
+  "https://localhost:9200/_ingest/pipeline/browser-privacy-monitor" \
+  | python3 -m json.tool
+```
+
+#### Step 4 — Test with simulate API
+
+```bash
+curl -u admin:YOUR_PASSWORD -k \
+  -X POST "https://localhost:9200/_ingest/pipeline/browser-privacy-monitor/_simulate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "docs": [{
+      "_source": {
+        "data": {
+          "url_redacted": "https://portal.com/reset?token=eyJhbGciOiJSUz...longtoken...longertoken...",
+          "sensitive_detected": "true",
+          "risk_score": "10"
+        }
+      }
+    }]
+  }'
+```
+
+Expected: `url_redacted` becomes `[PIPELINE-MASKED]`, `risk_score` becomes integer `10`, `sensitive_detected` becomes boolean `true`.
+
+> **Note on `default_pipeline`:** Applying a `default_pipeline` to `wazuh-alerts-4.x-*` index settings is possible but **not recommended** — it can interfere with Filebeat's existing pipeline and cause indexing failures. Method A (injecting into Filebeat's pipeline) is always safer.
+
+---
+
+### Where your Indexer address is
+
+| Setup | Use this address |
+|-------|-----------------|
+| All-in-one (single node) | `https://localhost:9200` |
+| Multi-node cluster | `https://<indexer-node-ip>:9200` |
+| Docker Compose | Check with `docker inspect wazuh.indexer` |
+
+Find it in your Wazuh Manager config:
+```bash
+grep -A3 "hosts" /etc/filebeat/filebeat.yml | head -6
+```
+
+---
+
+### Do I need the pipeline at all?
+
+**Honest answer:** For this project, **the pipeline is Layer 2 — a safety net, not the primary protection.**
+
+Layer 1 (endpoint redaction) already ensures raw secrets never reach Wazuh. The pipeline adds a second line of defence in case something slips through. If you are just getting started, focus on:
+
+1. ✅ Install the collector on endpoints (Layer 1 — the most important)
+2. ✅ Deploy decoder + rules on the Wazuh Manager
+3. ⬛ Apply the pipeline (Layer 2 — optional extra hardening)
+
+You get full detection and privacy protection from Layer 1 alone.
 
 ---
 
@@ -341,17 +539,20 @@ Every event written to the log is a single JSON line:
 ## Protection Layers
 
 ```
-Layer 1 — Endpoint Redaction (this collector)
+Layer 1 — Endpoint Redaction  ← PRIMARY (most important)
   Browser SQLite → PrivacyEngine → Redacted JSON log
   Raw URL never leaves the endpoint
+  Protects 99% of sensitive values before Wazuh ever sees them
 
-Layer 2 — Indexer Pipeline
+Layer 2 — Indexer Pipeline  ← OPTIONAL (safety net)
   wazuh/pipelines/browser_privacy_pipeline.json
-  Drops raw URL/title fields at OpenSearch index time
+  Injected into /usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json
+  Catches anything that slipped past Layer 1 at index time
 
-Layer 3 — Dashboard Access Control
-  Field-level security: url_hash and title_hash restricted to SOC leads
-  Normal analysts see only: domain, browser, user, risk_category, url_redacted
+Layer 3 — Dashboard Access Control  ← RECOMMENDED
+  Field-level security in Wazuh Dashboard
+  url_hash and title_hash: restricted to SOC lead role
+  Normal analysts: see only domain, browser, user, risk_category, url_redacted
 ```
 
 ---
@@ -371,11 +572,10 @@ Layer 3 — Dashboard Access Control
                     ┌────────────────▼─────────────────┐
                     │         WAZUH MANAGER            │
                     │  Decoder → Rules 901000–901030   │
-                    │  Alerts: domain, browser, user,  │
-                    │  risk_score, url_redacted         │
-                    │  Never: raw URL, tokens, secrets  │
+                    │  Filebeat → Wazuh Indexer        │
+                    │  (pipeline.json for extra guard) │
                     └────────────────┬─────────────────┘
-                                     │ Ingest Pipeline
+                                     │
                     ┌────────────────▼─────────────────┐
                     │      WAZUH INDEXER / DASHBOARD   │
                     │  Shows: redacted evidence only   │
@@ -425,7 +625,7 @@ rm ~/Library/LaunchAgents/com.ramkumar.browser-privacy-monitor.plist
 | sensitive_type field | ❌ | ❌ | ✅ |
 | url_hash (correlation) | ❌ | ❌ | ✅ |
 | Endpoint redaction engine | ❌ | ❌ | ✅ |
-| Indexer ingest pipeline | ❌ | ❌ | ✅ |
+| Indexer ingest pipeline | ❌ | ❌ | ✅ (optional) |
 | Dashboard spy risk | ⚠️ High | ⚠️ High | ✅ Eliminated |
 | log_format | syslog | syslog | **json** |
 
