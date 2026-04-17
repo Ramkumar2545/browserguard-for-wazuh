@@ -1,189 +1,190 @@
-# ==============================================================================
-#  Wazuh Browser Privacy Monitor — Windows Installer
-#  Author  : Ram Kumar G (IT Fortress)
-#  Version : 1.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
-#
-#  Installs:
-#    - Collector script  → C:\BrowserPrivacyMonitor\
-#    - Config file       → C:\BrowserPrivacyMonitor\.browser_privacy_config.json
-#    - Log file          → C:\BrowserPrivacyMonitor\browser_privacy.log
-#    - Task Scheduler    → "BrowserPrivacyMonitor" (runs as SYSTEM on boot + every 5m)
-#    - Wazuh localfile   → appended to ossec.conf
-#
-#  Usage (Admin PowerShell):
-#    Set-ExecutionPolicy Bypass -Scope Process -Force
-#    .\windows-installer.ps1
-#    .\windows-installer.ps1 -Interval 300
-#    .\windows-installer.ps1 -Uninstall
-# ==============================================================================
+<#
+.SYNOPSIS
+    Wazuh Browser Privacy Monitor Phase 3 - Windows Standalone Installer
+    Author  : Ram Kumar G (IT Fortress)
+    Version : 1.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
+
+.DESCRIPTION
+    Standalone installer for use from a cloned repo.
+    Installs collector, registers Task Scheduler job (SYSTEM),
+    writes config with selected interval, configures Wazuh ossec.conf.
+
+.USAGE
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    .\installers\windows-installer.ps1
+    .\installers\windows-installer.ps1 -Interval 300
+    .\installers\windows-installer.ps1 -Uninstall
+#>
 param(
-    [int]$Interval    = 300,
+    [int]$Interval = 0,
     [switch]$Uninstall
 )
 
 #Requires -RunAsAdministrator
-
 $ErrorActionPreference = "Stop"
 
-# ── Config ────────────────────────────────────────────────────────────────────
-$InstallDir    = "C:\BrowserPrivacyMonitor"
-$ScriptName    = "browser-privacy-monitor.py"
-$ScriptPath    = "$InstallDir\$ScriptName"
-$LogFile       = "$InstallDir\browser_privacy.log"
-$ConfigFile    = "$InstallDir\.browser_privacy_config.json"
-$TaskName      = "BrowserPrivacyMonitor"
-$OssecConf     = "C:\Program Files (x86)\ossec-agent\ossec.conf"
-$CollectorUrl  = "https://raw.githubusercontent.com/Ramkumar2545/wazuh-browser-privacy-monitor/main/collector/browser-privacy-monitor.py"
+$InstallDir  = "C:\BrowserPrivacyMonitor"
+$ScriptName  = "browser-privacy-monitor.py"
+$ConfigName  = ".browser_privacy_config.json"
+$TaskName    = "BrowserPrivacyMonitor"
+$LogFile     = "$InstallDir\browser_privacy.log"
+$WazuhConf   = "C:\Program Files (x86)\ossec-agent\ossec.conf"
+$WazuhSvc    = "WazuhSvc"
+$DestScript  = "$InstallDir\$ScriptName"
+$DestConfig  = "$InstallDir\$ConfigName"
+$Marker      = "<!-- BROWSER_PRIVACY_MONITOR_P3 -->"
+$Utf8NoBom   = New-Object System.Text.UTF8Encoding $false
+$RepoRaw     = "https://raw.githubusercontent.com/Ramkumar2545/wazuh-browser-privacy-monitor/main"
+$LocalScript = Join-Path (Split-Path $PSScriptRoot -Parent) "collector\$ScriptName"
 
-function Write-Step  { param($msg) Write-Host "[STEP]  $msg" -ForegroundColor Cyan }
-function Write-OK    { param($msg) Write-Host "[OK]    $msg" -ForegroundColor Green }
-function Write-Warn  { param($msg) Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
-function Write-Err   { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red; exit 1 }
-
-# ── Uninstall path ─────────────────────────────────────────────────────────────
 if ($Uninstall) {
-    Write-Step "Uninstalling $TaskName..."
+    Write-Host "[UNINSTALL] Removing..." -ForegroundColor Yellow
     try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    $Lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\WazuhBrowserPrivacyMonitor.lnk"
+    if (Test-Path $Lnk) { Remove-Item $Lnk -Force }
     if (Test-Path $InstallDir) { Remove-Item -Path $InstallDir -Recurse -Force }
-    Write-OK "Uninstalled. Log data removed."
-    exit 0
+    Write-Host "[OK] Uninstalled." -ForegroundColor Green; exit 0
 }
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor White
-Write-Host "║  Wazuh Browser Privacy Monitor — Windows Installer      ║" -ForegroundColor White
-Write-Host "║  Version 1.0.0 (Phase 3 - Privacy-Safe Telemetry)       ║" -ForegroundColor White
-Write-Host "║  IT Fortress by Ram Kumar G                              ║" -ForegroundColor White
-Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor White
+Write-Host "╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║  Wazuh Browser Privacy Monitor Phase 3 - Windows Installer       ║" -ForegroundColor Cyan
+Write-Host "║  Version 1.0.0 | Privacy-Safe Telemetry | IT Fortress            ║" -ForegroundColor Cyan
+Write-Host "╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Design: Raw URLs stay on endpoint — Wazuh only receives redacted JSON" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Step 1: Python check ──────────────────────────────────────────────────────
-Write-Step "Step 1/6 — Checking Python 3..."
-$PythonPath = $null
-foreach ($p in @("python", "python3", "py")) {
-    try {
-        $v = & $p --version 2>&1
-        if ($v -match "Python 3") { $PythonPath = (Get-Command $p).Source; break }
-    } catch {}
+# Step 1: Python
+Write-Host "[1] Detecting Python..." -ForegroundColor Yellow
+$PythonExe = $null
+foreach ($p in @(
+    "C:\Program Files\Python314\python.exe","C:\Program Files\Python313\python.exe",
+    "C:\Program Files\Python312\python.exe","C:\Program Files\Python311\python.exe",
+    "C:\Program Files\Python310\python.exe","C:\Program Files\Python39\python.exe",
+    "C:\Python314\python.exe","C:\Python313\python.exe","C:\Python312\python.exe"
+)) { if (Test-Path $p) { $PythonExe = $p; break } }
+if (-not $PythonExe) {
+    $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -notlike "*\Users\*") { $PythonExe = $cmd.Source }
 }
-if (-not $PythonPath) { Write-Err "Python 3 not found. Download from https://python.org/downloads" }
-Write-OK "Python found: $PythonPath"
+if (-not $PythonExe) { Write-Host "[-] Python not found. Install from https://python.org" -ForegroundColor Red; exit 1 }
+$PyDir      = Split-Path $PythonExe -Parent
+$PythonWExe = Join-Path $PyDir "pythonw.exe"
+if (-not (Test-Path $PythonWExe)) { $PythonWExe = $PythonExe }
+Write-Host "    [+] $PythonWExe" -ForegroundColor Green
 
-# ── Step 2: Create directories ────────────────────────────────────────────────
-Write-Step "Step 2/6 — Creating install directory..."
+# Step 2: Interval
+if ($Interval -gt 0) {
+    $SECS = $Interval; $LABEL = "${Interval}s"; $MINS = [Math]::Max(1, [int]($Interval / 60))
+    Write-Host "[2] CLI interval: ${SECS}s" -ForegroundColor Green
+} else {
+    Write-Host ""
+    Write-Host "[2] Select scan interval:" -ForegroundColor Yellow
+    Write-Host "     1)  1  minute   (testing only)" -ForegroundColor Gray
+    Write-Host "     2)  5  minutes" -ForegroundColor Gray
+    Write-Host "     3)  10 minutes" -ForegroundColor Gray
+    Write-Host "     4)  20 minutes" -ForegroundColor Gray
+    Write-Host "     5)  30 minutes  (recommended)" -ForegroundColor Cyan
+    Write-Host "     6)  60 minutes" -ForegroundColor Gray
+    Write-Host "     7)  2  hours" -ForegroundColor Gray
+    Write-Host "     8)  6  hours" -ForegroundColor Gray
+    Write-Host "     9)  12 hours" -ForegroundColor Gray
+    Write-Host "    10)  24 hours" -ForegroundColor Gray
+    Write-Host ""
+    $ch = Read-Host "    Enter choice [1-10] (default: 5)"
+    if ([string]::IsNullOrWhiteSpace($ch)) { $ch = "5" }
+    $map = @{"1"=@{S=60;L="1m";M=1};"2"=@{S=300;L="5m";M=5};"3"=@{S=600;L="10m";M=10};
+             "4"=@{S=1200;L="20m";M=20};"5"=@{S=1800;L="30m";M=30};"6"=@{S=3600;L="60m";M=60};
+             "7"=@{S=7200;L="2h";M=120};"8"=@{S=21600;L="6h";M=360};"9"=@{S=43200;L="12h";M=720};
+             "10"=@{S=86400;L="24h";M=1440}}
+    if (-not $map.ContainsKey($ch)) { $ch = "5" }
+    $SECS = $map[$ch].S; $LABEL = $map[$ch].L; $MINS = $map[$ch].M
+    Write-Host "    [+] Selected: $LABEL ($SECS seconds)" -ForegroundColor Green
+}
+$RepeatMins = if ($MINS -ge 1440) { 1440 } else { $MINS }
+
+# Step 3: Dir
+Write-Host ""
+Write-Host "[3] Creating $InstallDir..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-if (-not (Test-Path $LogFile)) { New-Item -ItemType File -Path $LogFile -Force | Out-Null }
-# Lock down permissions — only SYSTEM and Admins
 $Acl = Get-Acl $InstallDir
 $Acl.SetAccessRuleProtection($true, $false)
-$SysRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    "SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-$AdminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    "Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-$Acl.AddAccessRule($SysRule)
-$Acl.AddAccessRule($AdminRule)
+$Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM","FullControl","ContainerInherit,ObjectInherit","None","Allow")))
+$Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators","FullControl","ContainerInherit,ObjectInherit","None","Allow")))
 Set-Acl $InstallDir $Acl
-Write-OK "Directory: $InstallDir (SYSTEM + Admins only)"
+Write-Host "    [+] Created (SYSTEM + Admins only)" -ForegroundColor Green
 
-# ── Step 3: Download/copy collector ──────────────────────────────────────────
-Write-Step "Step 3/6 — Installing collector script..."
-$LocalScript = Join-Path (Split-Path $PSScriptRoot -Parent) "collector\$ScriptName"
+# Step 4: Collector
+Write-Host ""
+Write-Host "[4] Installing collector..." -ForegroundColor Yellow
 if (Test-Path $LocalScript) {
-    Copy-Item $LocalScript $ScriptPath -Force
-    Write-OK "Installed from local copy."
+    Copy-Item $LocalScript $DestScript -Force
+    Write-Host "    [+] Installed from local copy" -ForegroundColor Green
 } else {
-    try {
-        Invoke-WebRequest -Uri $CollectorUrl -OutFile $ScriptPath -UseBasicParsing
-        Write-OK "Downloaded from GitHub."
-    } catch {
-        Write-Err "Cannot download collector: $_"
-    }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -UseBasicParsing "$RepoRaw/collector/$ScriptName" -OutFile $DestScript
+    Write-Host "    [+] Downloaded from GitHub" -ForegroundColor Green
 }
 
-# ── Step 4: Write config (BOM-free UTF-8) ────────────────────────────────────
-Write-Step "Step 4/6 — Writing config (interval: ${Interval}s)..."
-$ConfigContent = @"
-{
-  "scan_interval_seconds": $Interval,
-  "version": "1.0.0"
+# Step 5: Config
+Write-Host ""
+Write-Host "[5] Writing config (BOM-free UTF-8)..." -ForegroundColor Yellow
+[System.IO.File]::WriteAllText($DestConfig,
+    "{`"scan_interval_seconds`": $SECS, `"scan_interval_label`": `"$LABEL`", `"version`": `"1.0.0`"}",
+    $Utf8NoBom)
+Write-Host "    [+] $DestConfig  [$LABEL = $SECS s]" -ForegroundColor Green
+
+# Step 6: Kill old
+Get-Process -Name python*,pythonw* -ErrorAction SilentlyContinue | ForEach-Object {
+    $cmd = (Get-WmiObject Win32_Process -Filter "ProcessId=$($_.Id)" -EA SilentlyContinue).CommandLine
+    if ($cmd -like "*browser-privacy-monitor*") { Stop-Process -Id $_.Id -Force -EA SilentlyContinue }
 }
-"@
-# Use UTF-8 without BOM (avoids PowerShell 5.x BOM injection)
-[System.IO.File]::WriteAllText($ConfigFile, $ConfigContent, [System.Text.UTF8Encoding]::new($false))
-Write-OK "Config: $ConfigFile"
 
-# ── Step 5: Task Scheduler ───────────────────────────────────────────────────
-Write-Step "Step 5/6 — Creating Scheduled Task..."
-# Remove old task if exists
-try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-
-$Action  = New-ScheduledTaskAction -Execute $PythonPath -Argument $ScriptPath -WorkingDirectory $InstallDir
-$Trigger = @(
-    (New-ScheduledTaskTrigger -AtStartup),
-    (New-ScheduledTaskTrigger -RepetitionInterval ([TimeSpan]::FromSeconds($Interval)) -Once -At (Get-Date))
-)
+# Step 7: Task Scheduler
+Write-Host ""
+Write-Host "[7] Creating Scheduled Task (SYSTEM, AtStartup + repeat every $RepeatMins min)..." -ForegroundColor Yellow
+$Action    = New-ScheduledTaskAction -Execute $PythonWExe -Argument "`"$DestScript`"" -WorkingDirectory $InstallDir
+$Trigger   = New-ScheduledTaskTrigger -AtStartup
 $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-$Settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
-                                           -RestartCount 3 `
-                                           -RestartInterval ([TimeSpan]::FromMinutes(1)) `
-                                           -MultipleInstances IgnoreNew
+$Settings  = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartInterval (New-TimeSpan -Minutes ([Math]::Max(1,$RepeatMins))) `
+    -RestartCount 9999 -MultipleInstances IgnoreNew
+Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal | Out-Null
+Set-ScheduledTask -TaskName $TaskName -Settings $Settings | Out-Null
+Write-Host "    [+] Task registered" -ForegroundColor Green
 
-Register-ScheduledTask -TaskName $TaskName `
-    -Action $Action `
-    -Trigger $Trigger `
-    -Principal $Principal `
-    -Settings $Settings `
-    -Description "Wazuh Browser Privacy Monitor Phase 3 — Privacy-Safe Telemetry" `
-    -Force | Out-Null
+# Step 8: Startup shortcut
+$Lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\WazuhBrowserPrivacyMonitor.lnk"
+$WS = New-Object -ComObject WScript.Shell
+$SC = $WS.CreateShortcut($Lnk)
+$SC.TargetPath=$PythonWExe; $SC.Arguments="`"$DestScript`""; $SC.WorkingDirectory=$InstallDir; $SC.Save()
 
-Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 2
-$TaskStatus = (Get-ScheduledTask -TaskName $TaskName).State
-Write-OK "Task '$TaskName' created. Status: $TaskStatus"
-
-# ── Step 6: Wazuh localfile config ────────────────────────────────────────────
-Write-Step "Step 6/6 — Configuring Wazuh agent localfile..."
-$LocalfileBlock = @"
-
-  <!-- Browser Privacy Monitor Phase 3 - Privacy-Safe Telemetry -->
-  <localfile>
-    <log_format>json</log_format>
-    <location>C:\BrowserPrivacyMonitor\browser_privacy.log</location>
-    <label key="integration">browser-privacy-monitor</label>
-  </localfile>
-"@
-
-if (Test-Path $OssecConf) {
-    $Content = Get-Content $OssecConf -Raw
-    if ($Content -match "browser-privacy-monitor") {
-        Write-Warn "Wazuh localfile already configured. Skipping."
-    } else {
-        $Content = $Content -replace "</ossec_config>", "$LocalfileBlock`n</ossec_config>"
-        [System.IO.File]::WriteAllText($OssecConf, $Content, [System.Text.UTF8Encoding]::new($false))
-        Write-OK "Added localfile to: $OssecConf"
-        # Restart Wazuh agent service
-        try {
-            Restart-Service -Name "WazuhSvc" -ErrorAction SilentlyContinue
-            Write-OK "Wazuh agent restarted."
-        } catch {
-            Write-Warn "Could not restart Wazuh agent. Restart manually."
-        }
-    }
-} else {
-    Write-Warn "Wazuh ossec.conf not found at: $OssecConf"
-    Write-Warn "Add this block manually:"
-    Write-Host $LocalfileBlock -ForegroundColor Yellow
-}
-
-# ── Done ──────────────────────────────────────────────────────────────────────
+# Step 9: Wazuh conf
 Write-Host ""
-Write-Host "Installation complete!" -ForegroundColor Green -NoNewline
+Write-Host "[9] Configuring Wazuh ossec.conf..." -ForegroundColor Yellow
+if (Test-Path $WazuhConf) {
+    $Content = Get-Content $WazuhConf -Raw
+    if ($Content -notmatch [regex]::Escape($Marker)) {
+        $Block = "`n  $Marker`n  <localfile>`n    <log_format>json</log_format>`n    <location>$LogFile</location>`n    <label key=`"integration`">browser-privacy-monitor</label>`n  </localfile>"
+        [System.IO.File]::WriteAllText($WazuhConf, ($Content -replace "</ossec_config>","$Block`n</ossec_config>"), $Utf8NoBom)
+        try { Restart-Service $WazuhSvc -EA SilentlyContinue } catch {}
+        Write-Host "    [+] localfile added (log_format=json)" -ForegroundColor Green
+    } else { Write-Host "    [=] Already configured" -ForegroundColor Gray }
+} else { Write-Host "    [!] ossec.conf not found at $WazuhConf" -ForegroundColor Yellow }
+
+# Step 10: Start
+Start-ScheduledTask -TaskName $TaskName -EA SilentlyContinue; Start-Sleep -Seconds 2
+
 Write-Host ""
-Write-Host "  Log file:   $LogFile"
-Write-Host "  Config:     $ConfigFile"
-Write-Host "  Task:       Get-ScheduledTask -TaskName '$TaskName'"
-Write-Host "  Live tail:  Get-Content '$LogFile' -Tail 20 -Wait"
-Write-Host "  Uninstall:  .\windows-installer.ps1 -Uninstall"
+Write-Host "╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
+Write-Host "║  [SUCCESS] Phase 3 Installation Complete!                        ║" -ForegroundColor Green
+Write-Host "╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
-Write-Host "Design: collect raw locally → detect locally → send only REDACTED to Wazuh" -ForegroundColor Cyan
+Write-Host "  Interval  : $LABEL ($SECS seconds)"
+Write-Host "  Log file  : $LogFile  [JSON — NO raw URLs]"
+Write-Host "  Watch     : Get-Content '$LogFile' -Tail 20 -Wait" -ForegroundColor Cyan
+Write-Host "  Task      : Get-ScheduledTask -TaskName '$TaskName'" -ForegroundColor Cyan
+Write-Host "  Uninstall : .\windows-installer.ps1 -Uninstall" -ForegroundColor Cyan
 Write-Host ""
