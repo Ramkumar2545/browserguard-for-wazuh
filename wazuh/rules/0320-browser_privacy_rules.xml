@@ -1,30 +1,37 @@
 <!--
   Wazuh Browser Privacy Monitor — Rules
   Author  : Ram Kumar G (IT Fortress)
-  Version : 1.1.0 (Phase 3 - Privacy-Safe Telemetry Edition)
+  Version : 2.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
   Rule IDs: 901000 - 901030
 
-  FIXES in v1.1.0:
-    1. All rules now use <decoded_as>browser-privacy-monitor</decoded_as>
-       on the parent (901010) so child rules inherit decoder context.
-    2. sensitive_detected boolean field: changed bare string match to
-       type="pcre2" with ^true$ / ^false$ to correctly match JSON booleans
-       after decoding (Wazuh stores decoded booleans as strings).
-    3. Rule 901017 (credential page): fixed field from sensitive_type to
-       risk_category=credential_page — matches actual log output where
-       risk_category=credential_page and sensitive_type=token.
-    4. Added Rule 901024 to catch risk_category=credential_page with
-       sensitive_type=token (the actual pattern seen in logs).
-    5. Rule 901030 risk_score pcre2 pattern extended to cover scores
-       >= 8 (scores 8, 9, 10 all appear for token/credential events).
-       Now uses ^([89]|10)$ to catch all high-risk scores.
-    6. Added service_started/stopped rules with correct decoded_as.
-    7. Group tag corrected: removed trailing comma inside group name
-       for MITRE-mapped rules to follow Wazuh convention.
+  ─────────────────────────────────────────────────────────────────────
+  CRITICAL FIX v2.0.0 — Root cause of "no alerts in alerts.json"
+  ─────────────────────────────────────────────────────────────────────
+    v1.x rules used:
+        <decoded_as>browser-privacy-monitor</decoded_as>
+    which NEVER matches when the localfile uses log_format=json.
+    Wazuh's native JSON decoder tags events with decoder.name="json"
+    (not any custom name). Every custom parent with <prematch> is
+    skipped for JSON localfiles.
+
+    v2.0.0 fix — follow the official Wazuh integration pattern
+    (same one used by VirusTotal, Sysmon, Suricata JSON logs):
+        <decoded_as>json</decoded_as>
+        <field name="integration">browser-privacy-monitor</field>
+
+    All parent rules below now use that pattern. Child rules inherit
+    via <if_sid>, so they don't need <decoded_as> of their own.
+
+  COMPATIBILITY:
+    - Works with log_format=json localfile (installers use this).
+    - If you relay via syslog and want rules under the syslog decoder,
+      duplicate the parent rule 901010 with
+      <decoded_as>browser-privacy-monitor-syslog</decoded_as> in a
+      separate file — or change the localfile to log_format=json.
 
   DESIGN PRINCIPLE:
     Rules fire on RISK INDICATORS only — never on raw secrets.
-    All alert descriptions show only: domain, browser, user, risk_category,
+    Alert descriptions show only: domain, browser, user, risk_category,
     sensitive_type, url_redacted, risk_score.
     Raw URL, full query strings, and tokens are NEVER referenced.
 
@@ -34,14 +41,13 @@
     T1567.002  - Exfiltration Over Web Service: Cloud Storage
     T1090.003  - Proxy: Multi-hop Proxy
     T1078      - Valid Accounts (credential page visit)
-    T1588.005  - Obtain Capabilities: Exploits
     T1204.002  - User Execution: Malicious File
 
   Rule Execution Order:
     901010 (parent) must fire first — all child rules use if_sid.
     More specific child rules fire at higher levels.
 
-  Fields available (from JSON decoder):
+  Fields available (from Wazuh native JSON decoder):
     integration, event_type, version, timestamp, endpoint, platform,
     user, browser, browser_profile, domain,
     sensitive_detected, sensitive_type, risk_category, risk_score,
@@ -54,7 +60,7 @@
        901000 — SERVICE STARTED
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901000" level="2">
-    <decoded_as>browser-privacy-monitor</decoded_as>
+    <decoded_as>json</decoded_as>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">service_started</field>
     <description>Browser Privacy Monitor: service started on $(endpoint) [$(platform)]</description>
@@ -65,7 +71,7 @@
        901001 — SERVICE STOPPED
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901001" level="2">
-    <decoded_as>browser-privacy-monitor</decoded_as>
+    <decoded_as>json</decoded_as>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">service_stopped</field>
     <description>Browser Privacy Monitor: service stopped on $(endpoint)</description>
@@ -74,11 +80,13 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901010 — BASE PARENT: every browser_visit event
-       FIX: Added <decoded_as> so all child rules inherit decoder context.
+       FIX v2.0.0: <decoded_as>json</decoded_as> so the rule fires for
+       events coming from the native JSON decoder (log_format=json).
+       All child rules below inherit context via <if_sid>.
        Level 3 — informational, captures all visits.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901010" level="3">
-    <decoded_as>browser-privacy-monitor</decoded_as>
+    <decoded_as>json</decoded_as>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">browser_visit</field>
     <description>Browser Visit [Privacy-Safe]: $(browser) [$(user)@$(endpoint)] domain=$(domain) risk=$(risk_category) score=$(risk_score)</description>
@@ -87,7 +95,7 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901011 — Normal visit, no sensitive data detected
-       FIX: Added type="pcre2" for boolean false match.
+       pcre2 anchors handle the decoded boolean "false" string.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901011" level="3">
     <if_sid>901010</if_sid>
@@ -98,7 +106,6 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901012 — Sensitive data detected (any type) — generic alert
-       FIX: Added type="pcre2" for boolean true match.
        Child rules below provide more specific classification.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901012" level="7">
@@ -155,7 +162,7 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901017 — Credential / Password field in sensitive_type
-       FIX: Matches sensitive_type=credential only (not credential_page
+       Matches sensitive_type=credential only (not credential_page
        which lives in risk_category — handled by 901024 below).
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901017" level="10">
@@ -168,9 +175,11 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901024 — Credential Page Visit (risk_category=credential_page)
-       FIX (NEW): Matches the actual log pattern where risk_category is
-       credential_page and sensitive_type is token. This is the pattern
-       seen in real logs from accounts.google.com login flows.
+       Matches the actual log pattern where risk_category is
+       credential_page and sensitive_type may be token/none. This is
+       the pattern seen in real logs from accounts.google.com login
+       flows. Hooked under 901010 (not 901012) so it fires even when
+       sensitive_detected=false.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901024" level="10">
     <if_sid>901010</if_sid>
@@ -247,9 +256,6 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901030 — High Risk Score >= 8 (composite high-risk)
-       FIX: Extended pcre2 pattern from ^(9|10)$ to ^([89]|10)$ to
-       capture risk_score=8 events (token/credential page visits
-       seen in real logs at accounts.google.com have risk_score=8).
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901030" level="12">
     <if_sid>901010</if_sid>

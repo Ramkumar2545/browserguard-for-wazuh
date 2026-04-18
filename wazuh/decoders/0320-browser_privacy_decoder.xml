@@ -1,28 +1,61 @@
 <!--
   Wazuh Browser Privacy Monitor — Decoder
   Author  : Ram Kumar G (IT Fortress)
-  Version : 1.2.0 (Phase 3 - Privacy-Safe Telemetry Edition)
+  Version : 2.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
 
-  FIX v1.2.0:
-    - Unified decoder naming: both JSON-direct and syslog-relay paths
-      now produce decoder name "browser-privacy-monitor" so that
-      rules using <decoded_as>browser-privacy-monitor</decoded_as>
-      fire correctly regardless of how the log arrives.
+  ─────────────────────────────────────────────────────────────────────
+  CRITICAL FIX v2.0.0 — "No alerts were firing" root cause
+  ─────────────────────────────────────────────────────────────────────
+    Previous versions defined a custom decoder named
+    "browser-privacy-monitor" and all rules used:
+        <decoded_as>browser-privacy-monitor</decoded_as>
 
-    PATH A — log_format="json" (recommended for Wazuh agent direct):
-      Wazuh parses JSON natively. The prematch decoder tags the event
-      with name "browser-privacy-monitor". The child JSON_Decoder
-      extracts all fields.
+    This NEVER WORKS for a localfile with <log_format>json</log_format>.
+    When Wazuh ingests a JSON localfile, it uses the built-in native
+    JSON decoder. The resulting event's decoder name is "json", NOT
+    any custom name. Custom parent decoders with <prematch> only run
+    in the text decoding pipeline (syslog / command / full_command /
+    eventchannel / multi-line).
 
-    PATH B — log_format="syslog" (syslog relay / forwarded logs):
-      Syslog header is pre-decoded by Wazuh (Phase 1). The parent
-      decoder matches program_name="browser-privacy-monitor" and is
-      also named "browser-privacy-monitor" so rules see the same
-      decoder name. The child JSON_Decoder extracts all fields from
-      the syslog message body.
+    Result: every rule with <decoded_as>browser-privacy-monitor</decoded_as>
+    was silently skipped in phase 3, and nothing ever hit alerts.json.
+
+    The documented Wazuh pattern for JSON integrations (see the
+    official VirusTotal integration rule) is:
+
+        <rule id="87100" level="0">
+          <decoded_as>json</decoded_as>
+          <field name="integration">virustotal</field>
+          ...
+        </rule>
+
+    The accompanying rules file (0320-browser_privacy_rules.xml v2.0.0)
+    has been rewritten to use <decoded_as>json</decoded_as> and matches
+    the "integration" field directly. No custom decoder is required
+    for the primary (direct JSON) ingestion path.
+  ─────────────────────────────────────────────────────────────────────
+
+  This file now only provides the OPTIONAL syslog-relay decoder
+  (PATH B) for environments that forward the collector's JSON log
+  through rsyslog/syslog-ng to the manager.
+
+    PATH A — log_format="json"  (recommended, used by installers)
+        No decoder needed — rules match via <decoded_as>json</decoded_as>
+        and <field name="integration">browser-privacy-monitor</field>.
+        This file's contents are IGNORED for PATH A, which is fine.
+
+    PATH B — log_format="syslog" (syslog relay)
+        Syslog header is pre-decoded (Phase 1), program_name is set
+        to "browser-privacy-monitor". The parent decoder below names
+        the event "browser-privacy-monitor-syslog" and the child
+        JSON_Decoder plugin extracts all fields from the syslog body.
+
+        Use <decoded_as>browser-privacy-monitor-syslog</decoded_as>
+        in custom rules if you need PATH B; the v2.0.0 rules file
+        uses <decoded_as>json</decoded_as> which covers PATH A only.
 
   Localfile config — PATH A (recommended):
-    Linux/macOS:
+    Linux / macOS:
       <localfile>
         <log_format>json</log_format>
         <location>/root/.browser-privacy-monitor/browser_privacy.log</location>
@@ -34,12 +67,6 @@
         <location>C:\BrowserPrivacyMonitor\browser_privacy.log</location>
       </localfile>
 
-  Localfile config — PATH B (syslog relay):
-    <localfile>
-      <log_format>syslog</log_format>
-      <location>/var/log/browser-privacy-monitor.log</location>
-    </localfile>
-
   JSON fields emitted by collector:
     integration, event_type, version, timestamp, endpoint, platform,
     user, browser, browser_profile, domain,
@@ -48,37 +75,20 @@
 -->
 
 <!-- ══════════════════════════════════════════════════════════════
-     PATH A — log_format="json" (direct agent JSON ingestion)
-     prematch fires on the raw JSON line and assigns decoder name
-     "browser-privacy-monitor" so rules decoded_as matches.
-     ══════════════════════════════════════════════════════════════ -->
+     PATH B ONLY — log_format="syslog" (syslog relay / forwarded)
 
-<decoder name="browser-privacy-monitor">
-  <prematch>{"integration": "browser-privacy-monitor"</prematch>
-</decoder>
-
-<decoder name="browser-privacy-monitor-fields">
-  <parent>browser-privacy-monitor</parent>
-  <plugin_decoder>JSON_Decoder</plugin_decoder>
-</decoder>
-
-<!-- ══════════════════════════════════════════════════════════════
-     PATH B — log_format="syslog" (syslog relay / forwarded)
-     The syslog header is pre-decoded by Wazuh (Phase 1) and
-     program_name is extracted. This parent decoder ALSO uses name
-     "browser-privacy-monitor" (same as PATH A) so that rules with
-     <decoded_as>browser-privacy-monitor</decoded_as> fire for
-     BOTH ingestion paths without any rule duplication.
-
-     Syslog line format:
+     Example syslog line:
        Apr 18 10:00:00 WIN-01 browser-privacy-monitor: {"integration":...
+
+     The parent decoder matches program_name; the child plugin
+     decoder parses the JSON body of the syslog message.
      ══════════════════════════════════════════════════════════════ -->
 
-<decoder name="browser-privacy-monitor">
+<decoder name="browser-privacy-monitor-syslog">
   <program_name>^browser-privacy-monitor$</program_name>
 </decoder>
 
-<decoder name="browser-privacy-monitor-fields">
-  <parent>browser-privacy-monitor</parent>
+<decoder name="browser-privacy-monitor-syslog-json">
+  <parent>browser-privacy-monitor-syslog</parent>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>

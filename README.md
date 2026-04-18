@@ -189,7 +189,9 @@ After installing the endpoint collector, configure the Wazuh Manager:
 cp wazuh/decoders/0320-browser_privacy_decoder.xml /var/ossec/etc/decoders/
 ```
 
-> If using `log_format=json` (default, recommended), this decoder is only needed as a syslog-relay fallback. Wazuh auto-parses JSON fields natively.
+> If using `log_format=json` (default, recommended), this decoder is only needed as a syslog-relay fallback. Wazuh auto-parses JSON fields natively, and rules match on `<decoded_as>json</decoded_as>` + `<field name="integration">browser-privacy-monitor</field>`.
+>
+> **v2.0.0 note** — If you pulled a pre-v2.0.0 copy and saw no alerts in `alerts.json` (e.g. `tail -f /var/ossec/logs/alerts/alerts.json | grep browser-privacy` returned nothing), that was caused by rules using `<decoded_as>browser-privacy-monitor</decoded_as>`, which never fires for `log_format=json` localfiles. Pull the latest `wazuh/rules/0320-browser_privacy_rules.xml` and restart the manager.
 
 ### Step 2 — Deploy rules
 
