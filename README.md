@@ -216,6 +216,41 @@ Paste this into `/var/ossec/bin/wazuh-logtest` to verify rules fire correctly:
 
 Expected: Rule **901014** fires at **Level 12** — `CRITICAL: Password Reset / Magic Link in Browser`
 
+### Step 5 — Verify alerts are reaching the manager
+
+Once rules are deployed and the agent is shipping events, watch `alerts.json` live:
+
+```bash
+sudo tail -f /var/ossec/logs/alerts/alerts.json | grep -i browser-privacy
+```
+
+You should see JSON alerts streaming in as endpoints browse. Each line is a full Wazuh alert with `rule.id`, `rule.level`, `rule.groups`, and the decoded fields under `data.*` (e.g. `data.integration`, `data.domain`, `data.risk_category`, `data.url_redacted`).
+
+For pretty-printed output:
+
+```bash
+sudo tail -f /var/ossec/logs/alerts/alerts.json \
+  | grep --line-buffered -i browser-privacy \
+  | jq 'select(.data.integration == "browser-privacy-monitor") | {ts: .timestamp, rule: .rule.id, level: .rule.level, desc: .rule.description, domain: .data.domain, risk: .data.risk_category}'
+```
+
+Other useful live views:
+
+```bash
+# Show the raw archive (everything, even level-0 non-alerts)
+# Requires <logall_json>yes</logall_json> in ossec.conf <global>
+sudo tail -f /var/ossec/logs/archives/archives.json | grep -i browser-privacy
+
+# Only high-severity browser-privacy alerts (level >= 10)
+sudo tail -f /var/ossec/logs/alerts/alerts.json \
+  | jq --unbuffered 'select(.data.integration == "browser-privacy-monitor" and .rule.level >= 10)'
+
+# Count events per risk_category over the last 1000 alerts
+sudo tail -n 1000 /var/ossec/logs/alerts/alerts.json \
+  | jq -r 'select(.data.integration == "browser-privacy-monitor") | .data.risk_category' \
+  | sort | uniq -c | sort -rn
+```
+
 ---
 
 ## Wazuh localfile Config (ossec.conf)
@@ -778,6 +813,138 @@ rm ~/Library/LaunchAgents/com.ramkumar.browser-privacy-monitor.plist
 | Endpoint redaction engine | ❌ | ❌ | ✅ |
 | Indexer ingest pipeline | ❌ | ❌ | ✅ (optional) |
 | log_format | syslog | syslog | **json** |
+
+---
+
+## Troubleshooting
+
+The commands below cover every failure mode we've seen in production deployments.
+
+### Symptom: `tail -f alerts.json | grep browser-privacy` shows nothing
+
+Work through these in order.
+
+**1. Is the endpoint log growing?**
+
+```bash
+# Linux / macOS
+tail -f /root/.browser-privacy-monitor/browser_privacy.log
+# Windows (on the agent)
+Get-Content "C:\BrowserPrivacyMonitor\browser_privacy.log" -Tail 20 -Wait
+```
+
+If this is empty, the collector isn't running. Restart the service:
+
+```bash
+# Linux
+systemctl restart browser-privacy-monitor
+# macOS
+launchctl kickstart -k gui/$(id -u)/com.itfortress.browser-privacy-monitor
+# Windows (as Administrator)
+Start-ScheduledTask -TaskName BrowserPrivacyMonitor
+```
+
+**2. Is the Wazuh agent reading the file?**
+
+On the agent, confirm the `<localfile>` block is present and `log_format=json`:
+
+```bash
+# Linux / macOS
+grep -A3 browser-privacy-monitor /var/ossec/etc/ossec.conf   # Linux
+grep -A3 browser-privacy-monitor /Library/Ossec/etc/ossec.conf # macOS
+```
+```powershell
+# Windows
+Select-String -Path "C:\Program Files (x86)\ossec-agent\ossec.conf" -Pattern browser-privacy -Context 0,3
+```
+
+Then confirm logcollector is tailing it:
+
+```bash
+sudo grep browser_privacy /var/ossec/logs/ossec.log | tail -5
+# Expect: "Analyzing file: '/root/.browser-privacy-monitor/browser_privacy.log'."
+```
+
+**3. Are events reaching the manager (before rules)?**
+
+Enable the archive log temporarily in `/var/ossec/etc/ossec.conf`:
+
+```xml
+<global>
+  <logall_json>yes</logall_json>
+</global>
+```
+
+Then:
+
+```bash
+sudo systemctl restart wazuh-manager
+sudo tail -f /var/ossec/logs/archives/archives.json | grep -i browser-privacy
+```
+
+If events appear here but not in `alerts.json`, the issue is the rules. Continue.
+
+**4. Run `wazuh-logtest` to pinpoint the rule miss**
+
+```bash
+sudo /var/ossec/bin/wazuh-logtest
+```
+
+Paste one JSON event from `browser_privacy.log`. Check which rule matches in Phase 3:
+
+| Phase 3 shows … | Meaning | Fix |
+|---|---|---|
+| `No rule matched` | Decoder ran but your rules didn't load | Confirm `0320-browser_privacy_rules.xml` is in `/var/ossec/etc/rules/` with `chown wazuh:wazuh, chmod 660`, then `systemctl restart wazuh-manager` |
+| `id: '86600' Suricata messages` | Suricata rule 86600 intercepted the event | You're on a pre-v2.1.0 rules file. Pull the latest — v2.1.0 uses `<if_sid>86600</if_sid>` to take precedence |
+| `id: '901011'` at level 3 | Rules work, but `<log_alert_level>` may be suppressing them | Check `<alerts><log_alert_level>` in `ossec.conf`; lower it to 3 or test with a higher-severity URL |
+| Your rule fires at the expected level | Pipeline is healthy | Issue is dashboard-side — see section below |
+
+**5. Is Filebeat shipping alerts to the indexer?**
+
+```bash
+sudo filebeat test output
+sudo journalctl -u filebeat -n 100 --no-pager | grep -iE "error|warn"
+```
+
+**6. Dashboard shows no events even though `alerts.json` has them**
+
+- In Wazuh Dashboard → **Discover** on `wazuh-alerts-*`, filter `data.integration : "browser-privacy-monitor"` and widen the time range to “Last 24 hours”.
+- Refresh the index pattern (Stack Management → Index Patterns → `wazuh-alerts-*` → “Refresh field list”) so newly added fields like `data.url_redacted`, `data.risk_score` become searchable.
+
+### Known manager-side errors and their fixes
+
+| Error in `ossec.log` | Cause | Fix |
+|---|---|---|
+| `ERROR: (1452): Syntax error on regex: '^\{'` | pre-v2.0.0 decoder with `<prematch>{"integration"…</prematch>` | Pull latest repo; the v2.0.0+ decoder file removes that broken prematch |
+| `ERROR: (1230): Invalid element in the configuration: 'decoders'` | v2.0.1 wrapped entries in a `<decoders>` root, which analysisd rejects | Pull v2.0.2+ — decoder file has bare `<decoder>` siblings |
+| `ERROR: (2107): Decoder configuration error` | Stale custom decoder still referenced | Remove the old decoder block from `/var/ossec/etc/decoders/local_decoder.xml` |
+| Phase 3 only fires rule `86600` | Suricata JSON catch-all won the match | Pull v2.1.0+ rules — parent rules now chain via `<if_sid>86600</if_sid>` |
+
+### One-shot health check
+
+After any change to rules or decoders:
+
+```bash
+# Offline ruleset syntax check (doesn't require a restart)
+sudo /var/ossec/bin/wazuh-analysisd -t && echo "CONFIG OK"
+
+# Restart and tail for fresh errors
+sudo systemctl restart wazuh-manager
+sudo tail -n 40 /var/ossec/logs/ossec.log | grep -iE "error|critical|started"
+
+# Live-watch browser-privacy alerts
+sudo tail -f /var/ossec/logs/alerts/alerts.json | grep -i browser-privacy
+```
+
+### Generate a high-severity test alert
+
+From any monitored browser, visit:
+
+- `https://accounts.google.com/signin` → triggers **901024** at level 10 (credential page)
+- `https://drive.google.com/` → triggers **901020** at level 7 (cloud storage)
+- `https://www.torproject.org/` → triggers **901021** at level 9 (anonymizer)
+
+The event shows up in `alerts.json` within one scan interval (default 5 minutes; set lower in `.browser_privacy_config.json` for testing).
 
 ---
 
