@@ -1,8 +1,35 @@
 <!--
   Wazuh Browser Privacy Monitor — Rules
   Author  : Ram Kumar G (IT Fortress)
-  Version : 2.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
+  Version : 2.1.0 (Phase 3 - Privacy-Safe Telemetry Edition)
   Rule IDs: 901000 - 901030
+
+  ─────────────────────────────────────────────────────────────────────
+  CRITICAL FIX v2.1.0 — Suricata rule 86600 was intercepting events
+  ─────────────────────────────────────────────────────────────────────
+    Symptom (from wazuh-logtest):
+      Phase 2: decoder 'json' extracted all fields correctly.
+      Phase 3: id='86600' level='0' description='Suricata messages'
+      → Our 901xxx rules never evaluated.
+
+    Root cause:
+      The built-in Suricata rule 86600 is defined as:
+        <rule id="86600" level="0">
+          <decoded_as>json</decoded_as>
+          <field name="event_type">\.+</field>
+          <description>Suricata messages.</description>
+        </rule>
+      It matches ANY JSON event with any event_type field and stops
+      further rule evaluation. Our collector emits event_type=
+      'browser_visit' so 86600 always wins.
+
+    Fix:
+      Parent rules 901000 / 901001 / 901010 now use
+      <if_sid>86600</if_sid> instead of a bare <decoded_as>json</decoded_as>.
+      This makes our rules children of 86600, so they are evaluated
+      after 86600 matches and the more-specific integration match
+      promotes the alert to our level.
+  ─────────────────────────────────────────────────────────────────────
 
   ─────────────────────────────────────────────────────────────────────
   CRITICAL FIX v2.0.0 — Root cause of "no alerts in alerts.json"
@@ -58,9 +85,11 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901000 — SERVICE STARTED
+       FIX v2.1.0: if_sid=86600 so we take precedence over the
+       Suricata catch-all that otherwise grabs every JSON event.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901000" level="2">
-    <decoded_as>json</decoded_as>
+    <if_sid>86600</if_sid>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">service_started</field>
     <description>Browser Privacy Monitor: service started on $(endpoint) [$(platform)]</description>
@@ -71,7 +100,7 @@
        901001 — SERVICE STOPPED
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901001" level="2">
-    <decoded_as>json</decoded_as>
+    <if_sid>86600</if_sid>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">service_stopped</field>
     <description>Browser Privacy Monitor: service stopped on $(endpoint)</description>
@@ -80,13 +109,15 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901010 — BASE PARENT: every browser_visit event
-       FIX v2.0.0: <decoded_as>json</decoded_as> so the rule fires for
-       events coming from the native JSON decoder (log_format=json).
-       All child rules below inherit context via <if_sid>.
+       FIX v2.1.0: <if_sid>86600</if_sid> — Suricata rule 86600 is a
+       greedy JSON catch-all that matches any event with event_type
+       set. Making our parent a child of 86600 ensures 901010 is
+       evaluated, matches more specifically, and our higher level
+       wins the alert.
        Level 3 — informational, captures all visits.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901010" level="3">
-    <decoded_as>json</decoded_as>
+    <if_sid>86600</if_sid>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">browser_visit</field>
     <description>Browser Visit [Privacy-Safe]: $(browser) [$(user)@$(endpoint)] domain=$(domain) risk=$(risk_category) score=$(risk_score)</description>
