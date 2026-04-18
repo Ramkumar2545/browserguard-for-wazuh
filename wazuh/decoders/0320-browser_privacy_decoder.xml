@@ -1,46 +1,60 @@
 <!--
   Wazuh Browser Privacy Monitor — Decoder
   Author  : Ram Kumar G (IT Fortress)
-  Version : 2.0.1 (Phase 3 - Privacy-Safe Telemetry Edition)
+  Version : 2.0.2 (Phase 3 - Privacy-Safe Telemetry Edition)
 
   ─────────────────────────────────────────────────────────────────────
-  CRITICAL NOTE — Why the primary ingestion path needs NO custom decoder
+  WHY THE PRIMARY PATH NEEDS NO CUSTOM DECODER
   ─────────────────────────────────────────────────────────────────────
-    Installers configure the Wazuh agent with:
+    Installers configure the agent with:
         <localfile>
           <log_format>json</log_format>
           <location>.../browser_privacy.log</location>
         </localfile>
 
-    When Wazuh ingests a JSON localfile, the native JSON decoder runs
-    and tags the event with decoder.name="json". Custom decoders with
-    <prematch> only execute in the text/syslog decoding pipeline and
-    are NEVER applied to JSON localfiles. Therefore the rules file
-    (0320-browser_privacy_rules.xml) uses:
-
+    For log_format=json, Wazuh's native JSON decoder runs and sets
+    decoder.name="json". Custom <prematch> decoders only run in the
+    text/syslog pipeline and are NEVER applied to JSON localfiles.
+    Therefore the rules (0320-browser_privacy_rules.xml) use:
         <decoded_as>json</decoded_as>
         <field name="integration">browser-privacy-monitor</field>
-
     which is the documented Wazuh pattern (same as VirusTotal).
 
-    This decoder file is therefore only used for PATH B — syslog
-    relay — where the collector's JSON is forwarded through rsyslog
-    or syslog-ng and arrives at the manager with a syslog header.
+    This decoder file is only used for PATH B — syslog relay — where
+    the collector's JSON log is forwarded via rsyslog / syslog-ng.
 
   ─────────────────────────────────────────────────────────────────────
-  FIX v2.0.1 — Wazuh Dashboard / API validation error
+  FIX HISTORY
   ─────────────────────────────────────────────────────────────────────
-    Previous v2.0.0 had two top-level <decoder> siblings. This works
-    fine for wazuh-analysisd when dropping the file directly into
-    /var/ossec/etc/decoders/, but the Wazuh Manager API endpoint
-        PUT /decoders/files/<filename>
-    validates uploads with a strict XML parser (libxml2). Strict XML
-    requires exactly one root element, so the dashboard "Edit
-    decoder" save returned an error that surfaced as:
-        returnErrorInstance → apiReq  (in wazuh.plugin.js)
+    v1.x — BROKEN
+        Used <prematch>{"integration": "browser-privacy-monitor"</prematch>.
+        The leading '{' is interpreted as an OSSEC regex quantifier
+        and analysisd aborts with:
+          ERROR: (1452): Syntax error on regex: '^\{'
+          ERROR: (2107): Decoder configuration error
+          CRITICAL: (1202): Configuration error at ...
 
-    Fix: wrap both <decoder> entries inside a single <decoders> root.
-    Wazuh accepts this form for both direct file copy and API upload.
+    v2.0.0 — Removed the broken prematch entirely. Two top-level
+        <decoder> siblings (correct format). Verified by inspecting
+        official Wazuh ruleset decoders (e.g. 0310-ssh_decoders.xml
+        has 24 top-level <decoder> elements, no wrapper).
+
+    v2.0.1 — WRONG FIX (reverted). Added a <decoders> wrapper based
+        on a mistaken assumption about the Manager API validator.
+        analysisd then rejects the file with:
+          ERROR: (1230): Invalid element in the configuration: 'decoders'
+          CRITICAL: (1202): Configuration error at ...
+
+    v2.0.2 — CURRENT. Back to the correct Wazuh format: multiple
+        <decoder> entries at the top level, NO wrapper. This form
+        loads cleanly in analysisd and is the same layout used by
+        every built-in Wazuh decoder file.
+
+        If the Wazuh Dashboard editor still shows a validation error
+        when saving this file, check:
+          1. File perms: chown wazuh:wazuh, chmod 660
+          2. No BOM / no Windows CRLF line endings
+          3. No unescaped special chars added by the editor
 
   ─────────────────────────────────────────────────────────────────────
   PATH B — log_format="syslog" (syslog relay / forwarded)
@@ -48,10 +62,7 @@
   Example syslog line:
     Apr 18 10:00:00 WIN-01 browser-privacy-monitor: {"integration":...
 
-  The parent decoder matches program_name; the child plugin decoder
-  parses the JSON body of the syslog message.
-
-  Add the corresponding localfile on the forwarding host:
+  Forwarding-host localfile:
     <localfile>
       <log_format>syslog</log_format>
       <location>/var/log/browser-privacy-monitor.log</location>
@@ -59,15 +70,11 @@
   ─────────────────────────────────────────────────────────────────────
 -->
 
-<decoders>
+<decoder name="browser-privacy-monitor-syslog">
+  <program_name>^browser-privacy-monitor$</program_name>
+</decoder>
 
-  <decoder name="browser-privacy-monitor-syslog">
-    <program_name>^browser-privacy-monitor$</program_name>
-  </decoder>
-
-  <decoder name="browser-privacy-monitor-syslog-json">
-    <parent>browser-privacy-monitor-syslog</parent>
-    <plugin_decoder>JSON_Decoder</plugin_decoder>
-  </decoder>
-
-</decoders>
+<decoder name="browser-privacy-monitor-syslog-json">
+  <parent>browser-privacy-monitor-syslog</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
