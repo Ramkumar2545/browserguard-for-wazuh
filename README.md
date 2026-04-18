@@ -18,6 +18,50 @@ Raw URLs, tokens, session IDs, API keys, passwords, and email addresses are **ne
 
 ---
 
+## Architecture & Diagrams
+
+A visual tour of how BrowserGuard fits together — from the browser history DB on each endpoint to the final Wazuh alert.
+
+### High-level architecture
+
+![High-level architecture: endpoints → local collector → Wazuh agent → Wazuh manager](docs/images/01-architecture.png)
+
+### End-to-end data flow
+
+Six stages from a browser visit to a Wazuh alert — and the exact JSON line that actually leaves the endpoint.
+
+![End-to-end data flow: Browser → Collect → Classify → Redact → Log → Alert](docs/images/02-dataflow.png)
+
+### Per-OS endpoint layout
+
+How the collector is packaged and run on each supported OS, with install paths, runner type, and operator commands.
+
+**Windows — SYSTEM Scheduled Task**
+
+![Windows endpoint: SYSTEM Scheduled Task running the collector from C:\BrowserPrivacyMonitor\](docs/images/03-endpoint-windows.png)
+
+**Linux — systemd service**
+
+![Linux endpoint: systemd service running the collector from /root/.browser-privacy-monitor/](docs/images/04-endpoint-linux.png)
+
+**macOS — LaunchAgent**
+
+![macOS endpoint: LaunchAgent running the collector from ~/.browser-privacy-monitor/ with Full Disk Access](docs/images/05-endpoint-macos.png)
+
+### Privacy-safe redaction
+
+What stays on the endpoint vs. what Wazuh actually sees — side by side.
+
+![Privacy-safe redaction: RAW (stays on endpoint) vs REDACTED (safe to log and forward)](docs/images/06-privacy-redaction.png)
+
+### Wazuh rule chain
+
+How the built-in Suricata catch-all rule 86600 is chained into the custom rule set 901000–901030.
+
+![Wazuh rule chain: Suricata 86600 → 901000/901001/901010 parents → 901011–901024 children → 901030 composite](docs/images/07-rule-chain.png)
+
+---
+
 ## One-Line Installation
 
 ### Linux
