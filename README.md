@@ -75,6 +75,25 @@ powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::Security
 
 **Non-interactive switches:** `-y` / `--non-interactive` (shell), `-NonInteractive` (PowerShell), or `BPM_NONINTERACTIVE=1`.
 
+### Silent installers (30 m default, zero prompts)
+
+For mass deployment (MDM / RMM / Ansible / Intune / Jamf / SCCM), use the dedicated silent installers under [`installers/automatic/`](installers/automatic/). They always install with a **30-minute** interval and never prompt.
+
+```bash
+# Linux (silent, 30m)
+curl -sSL https://raw.githubusercontent.com/Ramkumar2545/wazuh-browser-privacy-monitor/main/installers/automatic/install-linux.sh | sudo bash
+
+# macOS (silent, 30m)
+curl -sSL https://raw.githubusercontent.com/Ramkumar2545/wazuh-browser-privacy-monitor/main/installers/automatic/install-macos.sh | bash
+```
+
+```powershell
+# Windows (silent, 30m — Admin PowerShell)
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iwr -UseBasicParsing 'https://raw.githubusercontent.com/Ramkumar2545/wazuh-browser-privacy-monitor/main/installers/automatic/install-windows.ps1' | iex"
+```
+
+See [`installers/automatic/README.md`](installers/automatic/README.md) for overrides, exit codes, and uninstall.
+
 ---
 
 ## Scan Interval Options
