@@ -1,8 +1,26 @@
 <!--
   Wazuh Browser Privacy Monitor — Rules
   Author  : Ram Kumar G (IT Fortress)
-  Version : 1.0.0 (Phase 3 - Privacy-Safe Telemetry Edition)
+  Version : 1.1.0 (Phase 3 - Privacy-Safe Telemetry Edition)
   Rule IDs: 901000 - 901030
+
+  FIXES in v1.1.0:
+    1. All rules now use <decoded_as>browser-privacy-monitor</decoded_as>
+       on the parent (901010) so child rules inherit decoder context.
+    2. sensitive_detected boolean field: changed bare string match to
+       type="pcre2" with ^true$ / ^false$ to correctly match JSON booleans
+       after decoding (Wazuh stores decoded booleans as strings).
+    3. Rule 901017 (credential page): fixed field from sensitive_type to
+       risk_category=credential_page — matches actual log output where
+       risk_category=credential_page and sensitive_type=token.
+    4. Added Rule 901024 to catch risk_category=credential_page with
+       sensitive_type=token (the actual pattern seen in logs).
+    5. Rule 901030 risk_score pcre2 pattern extended to cover scores
+       >= 8 (scores 8, 9, 10 all appear for token/credential events).
+       Now uses ^([89]|10)$ to catch all high-risk scores.
+    6. Added service_started/stopped rules with correct decoded_as.
+    7. Group tag corrected: removed trailing comma inside group name
+       for MITRE-mapped rules to follow Wazuh convention.
 
   DESIGN PRINCIPLE:
     Rules fire on RISK INDICATORS only — never on raw secrets.
@@ -20,8 +38,8 @@
     T1204.002  - User Execution: Malicious File
 
   Rule Execution Order:
-    901001 (parent) must be first.
-    More specific child rules override with higher levels.
+    901010 (parent) must fire first — all child rules use if_sid.
+    More specific child rules fire at higher levels.
 
   Fields available (from JSON decoder):
     integration, event_type, version, timestamp, endpoint, platform,
@@ -33,16 +51,21 @@
 <group name="browser_privacy,">
 
   <!-- ═══════════════════════════════════════════════════════════════
-       901000 — SERVICE EVENTS (start/stop)
+       901000 — SERVICE STARTED
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901000" level="2">
+    <decoded_as>browser-privacy-monitor</decoded_as>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">service_started</field>
-    <description>Browser Privacy Monitor: service started on $(endpoint) [$(platform)] interval=$(scan_interval_seconds)s</description>
+    <description>Browser Privacy Monitor: service started on $(endpoint) [$(platform)]</description>
     <group>browser_privacy,service_event,</group>
   </rule>
 
+  <!-- ═══════════════════════════════════════════════════════════════
+       901001 — SERVICE STOPPED
+       ═══════════════════════════════════════════════════════════════ -->
   <rule id="901001" level="2">
+    <decoded_as>browser-privacy-monitor</decoded_as>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">service_stopped</field>
     <description>Browser Privacy Monitor: service stopped on $(endpoint)</description>
@@ -50,10 +73,12 @@
   </rule>
 
   <!-- ═══════════════════════════════════════════════════════════════
-       901010 — BASE PARENT: every browser visit (log_format json)
-       Level 3 — informational, captures all visits for full visibility.
+       901010 — BASE PARENT: every browser_visit event
+       FIX: Added <decoded_as> so all child rules inherit decoder context.
+       Level 3 — informational, captures all visits.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901010" level="3">
+    <decoded_as>browser-privacy-monitor</decoded_as>
     <field name="integration">browser-privacy-monitor</field>
     <field name="event_type">browser_visit</field>
     <description>Browser Visit [Privacy-Safe]: $(browser) [$(user)@$(endpoint)] domain=$(domain) risk=$(risk_category) score=$(risk_score)</description>
@@ -62,22 +87,24 @@
 
   <!-- ═══════════════════════════════════════════════════════════════
        901011 — Normal visit, no sensitive data detected
+       FIX: Added type="pcre2" for boolean false match.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901011" level="3">
     <if_sid>901010</if_sid>
-    <field name="sensitive_detected">false</field>
-    <description>Browser Visit: $(browser) [$(user)@$(endpoint)] → $(domain) [clean]</description>
+    <field name="sensitive_detected" type="pcre2">^false$</field>
+    <description>Browser Visit: $(browser) [$(user)@$(endpoint)] -> $(domain) [clean]</description>
     <group>browser_privacy,normal_visit,</group>
   </rule>
 
   <!-- ═══════════════════════════════════════════════════════════════
        901012 — Sensitive data detected (any type) — generic alert
+       FIX: Added type="pcre2" for boolean true match.
        Child rules below provide more specific classification.
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901012" level="7">
     <if_sid>901010</if_sid>
-    <field name="sensitive_detected">true</field>
-    <description>Sensitive Browsing Detected: $(sensitive_type) via $(browser) [$(user)@$(endpoint)] domain=$(domain) redacted=$(url_redacted)</description>
+    <field name="sensitive_detected" type="pcre2">^true$</field>
+    <description>Sensitive Browsing Detected: $(sensitive_type) via $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <group>browser_privacy,sensitive_detected,</group>
   </rule>
 
@@ -88,7 +115,7 @@
   <rule id="901013" level="12">
     <if_sid>901012</if_sid>
     <field name="sensitive_type" type="pcre2">^(auth_token|session_id)$</field>
-    <description>CRITICAL: Auth Token/Session ID Exposure Risk — $(browser) [$(user)@$(endpoint)] domain=$(domain) type=$(sensitive_type) url=$(url_redacted)</description>
+    <description>CRITICAL: Auth Token/Session ID Exposure Risk - $(browser) [$(user)@$(endpoint)] domain=$(domain) type=$(sensitive_type) url=$(url_redacted)</description>
     <mitre><id>T1552.001</id></mitre>
     <group>browser_privacy,token_exposure,high_risk,</group>
   </rule>
@@ -99,7 +126,7 @@
   <rule id="901014" level="12">
     <if_sid>901012</if_sid>
     <field name="sensitive_type" type="pcre2">^(password_reset|magic_link)$</field>
-    <description>CRITICAL: Password Reset / Magic Link in Browser — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <description>CRITICAL: Password Reset / Magic Link in Browser - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <mitre><id>T1078</id></mitre>
     <group>browser_privacy,password_reset,high_risk,</group>
   </rule>
@@ -110,7 +137,7 @@
   <rule id="901015" level="10">
     <if_sid>901012</if_sid>
     <field name="sensitive_type">auth_code</field>
-    <description>High: OAuth/Auth-Code Callback Detected — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <description>High: OAuth/Auth-Code Callback Detected - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <mitre><id>T1078</id></mitre>
     <group>browser_privacy,auth_code,high_risk,</group>
   </rule>
@@ -121,20 +148,36 @@
   <rule id="901016" level="10">
     <if_sid>901012</if_sid>
     <field name="sensitive_type">api_key</field>
-    <description>High: API Key Parameter in Browser URL — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <description>High: API Key Parameter in Browser URL - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <mitre><id>T1552.001</id></mitre>
     <group>browser_privacy,api_key_exposure,high_risk,</group>
   </rule>
 
   <!-- ═══════════════════════════════════════════════════════════════
-       901017 — Credential / Password in URL
+       901017 — Credential / Password field in sensitive_type
+       FIX: Matches sensitive_type=credential only (not credential_page
+       which lives in risk_category — handled by 901024 below).
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901017" level="10">
     <if_sid>901012</if_sid>
-    <field name="sensitive_type" type="pcre2">^(credential|credential_page)$</field>
-    <description>High: Credential/Login Page or Password in URL — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <field name="sensitive_type" type="pcre2">^credential$</field>
+    <description>High: Credential/Password in URL - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <mitre><id>T1566.002</id></mitre>
     <group>browser_privacy,credential_exposure,high_risk,phishing_risk,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       901024 — Credential Page Visit (risk_category=credential_page)
+       FIX (NEW): Matches the actual log pattern where risk_category is
+       credential_page and sensitive_type is token. This is the pattern
+       seen in real logs from accounts.google.com login flows.
+       ═══════════════════════════════════════════════════════════════ -->
+  <rule id="901024" level="10">
+    <if_sid>901010</if_sid>
+    <field name="risk_category">credential_page</field>
+    <description>High: Credential/Login Page Visited - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <mitre><id>T1078</id></mitre>
+    <group>browser_privacy,credential_page,high_risk,phishing_risk,</group>
   </rule>
 
   <!-- ═══════════════════════════════════════════════════════════════
@@ -143,7 +186,7 @@
   <rule id="901018" level="7">
     <if_sid>901012</if_sid>
     <field name="sensitive_type">email</field>
-    <description>Medium: Email Address Detected in URL Query — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <description>Medium: Email Address Detected in URL Query - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <group>browser_privacy,email_exposure,pii_risk,gdpr_IV_35.7.d,</group>
   </rule>
 
@@ -153,7 +196,7 @@
   <rule id="901019" level="8">
     <if_sid>901012</if_sid>
     <field name="sensitive_type" type="pcre2">^(internal_doc|personal_query)$</field>
-    <description>Medium: Internal Document or Export URL Accessed — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <description>Medium: Internal Document or Export URL Accessed - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <mitre><id>T1567.002</id></mitre>
     <group>browser_privacy,internal_doc,data_exfil_risk,</group>
   </rule>
@@ -197,17 +240,20 @@
   <rule id="901023" level="8">
     <if_sid>901012</if_sid>
     <field name="sensitive_type">token</field>
-    <description>Medium: High-Entropy Token-Like String Detected in URL — $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
+    <description>Medium: High-Entropy Token-Like String Detected in URL - $(browser) [$(user)@$(endpoint)] domain=$(domain) url=$(url_redacted)</description>
     <mitre><id>T1552.001</id></mitre>
     <group>browser_privacy,token_exposure,</group>
   </rule>
 
   <!-- ═══════════════════════════════════════════════════════════════
-       901030 — Risk Score >= 9 (any type, composite high-risk)
+       901030 — High Risk Score >= 8 (composite high-risk)
+       FIX: Extended pcre2 pattern from ^(9|10)$ to ^([89]|10)$ to
+       capture risk_score=8 events (token/credential page visits
+       seen in real logs at accounts.google.com have risk_score=8).
        ═══════════════════════════════════════════════════════════════ -->
   <rule id="901030" level="12">
     <if_sid>901010</if_sid>
-    <field name="risk_score" type="pcre2">^(9|10)$</field>
+    <field name="risk_score" type="pcre2">^([89]|10)$</field>
     <description>CRITICAL Risk Score: $(browser) [$(user)@$(endpoint)] risk_score=$(risk_score) type=$(sensitive_type) domain=$(domain) url=$(url_redacted)</description>
     <group>browser_privacy,critical_risk,high_risk,</group>
   </rule>
