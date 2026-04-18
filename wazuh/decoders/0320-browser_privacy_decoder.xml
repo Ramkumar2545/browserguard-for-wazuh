@@ -67,12 +67,11 @@
 
 <!-- Parent: match syslog header containing our tag -->
 <decoder name="browser-privacy-monitor">
-  <program_name>^browser\-privacy\-monitor$</program_name>
+  <program_name>browser-privacy-monitor</program_name>
 </decoder>
 
 <!-- Child: extract JSON from the syslog body -->
 <decoder name="browser-privacy-monitor-json">
   <parent>browser-privacy-monitor</parent>
-  <prematch>^\{</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>
